@@ -8,15 +8,45 @@ import os
 from dotenv import load_dotenv
 import google.generativeai as genai # Import Gemini library
 import traceback # For detailed error logging
+import numpy as np # For FAISS
+import faiss       # For vector search
+import re          # For splitting text
 
 st.set_page_config(layout="wide") # Use wider layout
 
 # Load environment variables
 load_dotenv()
 
-# --- Reddit API Setup ---
-# Encapsulate initialization to avoid running it multiple times if script reruns weirdly
-# This pattern is correct for Streamlit - runs once per session unless cleared.
+# --- Helper Function for Text Splitting (Unchanged) ---
+def split_text_into_chunks(text, max_chunk_size=500, overlap=50):
+    """Splits text into potentially overlapping chunks."""
+    if not text:
+        return []
+    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+    chunks = []
+    for para in paragraphs:
+        words = para.split()
+        current_chunk_words = []
+        for word in words:
+            current_chunk_words.append(word)
+            if len(current_chunk_words) > max_chunk_size * 0.8:
+                 chunk_text = " ".join(current_chunk_words)
+                 if len(chunk_text) > 10:
+                     chunks.append(chunk_text)
+                 current_chunk_words = current_chunk_words[-overlap:] if overlap > 0 else []
+        if current_chunk_words:
+             chunk_text = " ".join(current_chunk_words)
+             if len(chunk_text) > 10:
+                chunks.append(chunk_text)
+    if not chunks and text:
+         for i in range(0, len(text), max_chunk_size - overlap):
+             chunk = text[i:i + max_chunk_size]
+             if len(chunk.strip()) > 10:
+                 chunks.append(chunk.strip())
+    print(f"Split text into {len(chunks)} chunks.")
+    return chunks
+
+# --- Reddit API Setup (Unchanged) ---
 if 'reddit_client' not in st.session_state:
     try:
         reddit_client_id = os.getenv("REDDIT_CLIENT_ID")
@@ -24,14 +54,11 @@ if 'reddit_client' not in st.session_state:
         reddit_user_agent = os.getenv("REDDIT_USER_AGENT")
         if not all([reddit_client_id, reddit_client_secret, reddit_user_agent]):
              raise ValueError("Missing Reddit API credentials in environment variables (REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT).")
-
         st.session_state.reddit_client = praw.Reddit(
             client_id=reddit_client_id,
             client_secret=reddit_client_secret,
             user_agent=reddit_user_agent
         )
-        # Test authentication (optional but good)
-        # print(f"Testing Reddit auth for user: {st.session_state.reddit_client.user.me()}") # Requires auth scope usually
         print("Reddit API Client Initialized (Read-Only Check Passed)")
         st.session_state.reddit_error = None
     except Exception as e:
@@ -39,36 +66,33 @@ if 'reddit_client' not in st.session_state:
         traceback.print_exc()
         st.session_state.reddit_client = None
         st.session_state.reddit_error = f"Failed to initialize Reddit API. Check credentials/logs. Error: {e}"
-        # Display error early in Streamlit
         st.error(st.session_state.reddit_error)
-        # No need to st.stop() here, allow app to load but show error
 
-# --- Gemini API Setup ---
+# --- Gemini API Setup (Unchanged) ---
 if 'gemini_model' not in st.session_state:
     try:
         gemini_api_key = os.getenv("GEMINI_API_KEY")
         if not gemini_api_key:
             raise ValueError("GEMINI_API_KEY not found in environment variables.")
         genai.configure(api_key=gemini_api_key)
-        # Use a specific model name
-        st.session_state.gemini_model = genai.GenerativeModel('gemini-1.5-flash-latest') # Use a known working model like 1.5 Flash
-        print("Gemini API Configured Successfully")
+        st.session_state.gemini_model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        st.session_state.gemini_embedding_model = 'models/embedding-001'
+        print(f"Gemini API Configured Successfully (Model: gemini-1.5-flash-latest, Embeddings: {st.session_state.gemini_embedding_model})")
         st.session_state.gemini_error = None
     except Exception as e:
         print(f"Error initializing Gemini API: {e}")
         traceback.print_exc()
         st.session_state.gemini_model = None
-        st.session_state.gemini_error = f"Failed to configure Gemini API. Summarization will not work. Error: {e}"
-        # Display warning in Streamlit
+        st.session_state.gemini_embedding_model = None
+        st.session_state.gemini_error = f"Failed to configure Gemini API. Summarization/QA will not work. Error: {e}"
         st.warning(st.session_state.gemini_error)
-
-# Access clients from session state where needed
-# Note: Directly accessing st.session_state within functions is often clearer
-# reddit = st.session_state.get('reddit_client')
-# gemini_model = st.session_state.get('gemini_model')
 
 
 # --- Comment Processing Functions (Unchanged) ---
+# format_post_for_llm(...)
+# process_comment_recursive(...)
+# resolve_reddit_url(...)
+# (Keep your existing functions here - unchanged)
 def format_post_for_llm(post, query_keywords, max_top_comments=20, max_depth=3, min_score=3, min_length=20):
     llm_input_string = f"Reddit Post URL: {post.url}\n" # Add URL for context
     llm_input_string += f"Post Title: {post.title}\n"
@@ -147,7 +171,6 @@ def process_comment_recursive(comment, query_keywords, current_depth, max_depth,
 
     return formatted_comment + replies_text
 
-# --- URL Resolution Function (Unchanged) ---
 def resolve_reddit_url(url):
     if not url or "reddit.com" not in url:
         return None # Not a reddit URL
@@ -176,7 +199,9 @@ def resolve_reddit_url(url):
         return None
 
 
-# --- Core Summarization Logic Function ---
+# --- Core Summarization Logic Function (Unchanged) ---
+# get_reddit_summary(...)
+# (Keep your existing function here - unchanged)
 def get_reddit_summary(original_url):
     """
     Fetches Reddit post, processes comments, generates Gemini summary.
@@ -262,7 +287,8 @@ def get_reddit_summary(original_url):
                      gemini_summary = "[Gemini response was empty or incomplete]"
                      print(f"Gemini Warning: Response empty. Feedback: {response.prompt_feedback}")
                 else:
-                    gemini_summary = response.text
+                    # Ensure response.text is available and not None
+                    gemini_summary = response.text if hasattr(response, 'text') else "[Gemini response format unexpected]"
                     print("Gemini Summarization Successful")
 
             except Exception as e:
@@ -289,18 +315,15 @@ def get_reddit_summary(original_url):
             "gemini_summary": gemini_summary
         }
 
-    # --- Specific Error Handling for PRAW/Network Issues during fetch ---
-    # Place these specific exceptions before the general Exception catch-all
+    # --- Specific Error Handling (Unchanged) ---
     except prawcore.exceptions.Redirect as e:
          print(f"PRAW Error: Unexpected redirect for {resolved_url}. URL: {e.response.url}")
-         # This shouldn't happen often if resolve_reddit_url works, but handle it.
          raise ConnectionError(f"Unexpected redirect error after URL resolution: {resolved_url}") from e
     except prawcore.exceptions.NotFound:
          print(f"PRAW Error: Submission not found at {resolved_url}.")
          raise FileNotFoundError(f"Reddit post not found at the resolved URL: {resolved_url}") # Use more specific built-in exception
     except prawcore.exceptions.Forbidden as e:
          print(f"PRAW Error: Access forbidden for {resolved_url} (private/deleted?).")
-         # Add more detail if available from the exception object
          error_msg = f"Access denied to the Reddit post ({resolved_url}). It might be private, quarantined, or deleted."
          if hasattr(e, 'response') and e.response is not None:
              error_msg += f" (HTTP Status: {e.response.status_code})"
@@ -310,7 +333,6 @@ def get_reddit_summary(original_url):
     except praw.exceptions.RedditAPIException as e:
         print(f"Reddit API Error during fetch/processing: {e}")
         traceback.print_exc()
-        # Provide a user-friendly message, log the technical details
         raise ConnectionError(f"A Reddit API error occurred: {e}") from e
     except requests.exceptions.ConnectionError as e: # Catch potential connection errors during PRAW calls too
         print(f"Network Connection Error: {e}")
@@ -320,18 +342,97 @@ def get_reddit_summary(original_url):
         print(f"Network Timeout Error: {e}")
         traceback.print_exc()
         raise TimeoutError(f"The request timed out while contacting Reddit or Gemini.") from e
-    # Keep a general Exception catch-all at the end
     except Exception as e:
         print(f"An unexpected error occurred in get_reddit_summary: {e}")
         traceback.print_exc() # Print detailed traceback to console/log
-        # Raise a generic exception for the UI to catch
         raise RuntimeError(f"An unexpected error occurred during processing: {e}") from e
 
 
-# ======== Streamlit Frontend (Mostly Unchanged, but calls local function) ========
+# --- FAISS Indexing Function (Unchanged) ---
+def create_faiss_index(text_chunks, embedding_model_name):
+    """Creates a FAISS index from text chunks."""
+    if not text_chunks:
+        return None, None
+    try:
+        print(f"Generating embeddings for {len(text_chunks)} chunks using {embedding_model_name}...")
+        result = genai.embed_content(
+            model=embedding_model_name,
+            content=text_chunks,
+            task_type="retrieval_document"
+        )
+        embeddings = result['embedding']
+        print(f"Successfully generated {len(embeddings)} embeddings.")
+        embeddings_np = np.array(embeddings, dtype='float32')
+        if embeddings_np.ndim == 1:
+             embeddings_np = np.expand_dims(embeddings_np, axis=0)
+        if embeddings_np.ndim != 2 or embeddings_np.shape[0] != len(text_chunks):
+            raise ValueError(f"Embeddings shape mismatch: expected ({len(text_chunks)}, D), got {embeddings_np.shape}")
+        dimension = embeddings_np.shape[1]
+        print(f"Embedding dimension: {dimension}")
+        index = faiss.IndexFlatL2(dimension)
+        index.add(embeddings_np)
+        print(f"FAISS index created successfully with {index.ntotal} vectors.")
+        return index, text_chunks
+    except Exception as e:
+        print(f"Error creating FAISS index: {e}")
+        traceback.print_exc()
+        st.error(f"Failed to create search index for the summary: {e}")
+        return None, None
 
-st.title("Reddit Discussion Summarizer")
-st.write("Enter a Reddit post link to get a summary.")
+# --- RAG Query Function (Unchanged) ---
+def query_faiss_and_generate(question, index, chunks, llm_model, embedding_model_name, top_k=3):
+    """Queries FAISS, gets context, and generates answer using Gemini."""
+    if not index or not chunks:
+        return "[Error: Search index not available for Q&A]"
+    if not llm_model or not embedding_model_name:
+        return "[Error: LLM or embedding model not available for Q&A]"
+    try:
+        print(f"Embedding question: '{question[:50]}...' using {embedding_model_name}")
+        response = genai.embed_content(
+            model=embedding_model_name,
+            content=question,
+            task_type="retrieval_query"
+        )
+        question_embedding = np.array([response['embedding']], dtype='float32')
+        print("Question embedded successfully.")
+        print(f"Searching FAISS index for top {top_k} results...")
+        distances, indices = index.search(question_embedding, top_k)
+        print(f"FAISS search completed. Found indices: {indices[0]}")
+        retrieved_chunks = [chunks[i] for i in indices[0] if i < len(chunks)]
+        if not retrieved_chunks:
+            print("No relevant chunks found in FAISS search.")
+            return "I couldn't find specific information about that in the summary."
+        context = "\n\n---\n\n".join(retrieved_chunks)
+        print(f"Retrieved context (first 100 chars): {context[:100]}...")
+        rag_prompt = (
+            f"**Instruction:** Answer the following question based *only* on the provided context from the Reddit summary.\n\n"
+            f"**Context from Summary:**\n{context}\n\n"
+            f"**Question:** {question}\n\n"
+            f"**Answer:**"
+        )
+        print("Generating answer using Gemini with retrieved context...")
+        generation_response = llm_model.generate_content(rag_prompt)
+        if generation_response.prompt_feedback and generation_response.prompt_feedback.block_reason:
+            block_reason = generation_response.prompt_feedback.block_reason
+            print(f"Gemini RAG response blocked: {block_reason}")
+            return f"[Answer generation blocked due to safety filters: {block_reason}]"
+        elif not generation_response.parts:
+             print(f"Gemini RAG response empty. Feedback: {generation_response.prompt_feedback}")
+             return "[Answer generation failed or was empty]"
+        else:
+             final_answer = generation_response.text
+             print("Gemini RAG answer generated successfully.")
+             return final_answer
+    except Exception as e:
+        print(f"Error during FAISS query or RAG generation: {e}")
+        traceback.print_exc()
+        return f"[Error answering question: {e}]"
+
+
+# ======== Streamlit Frontend ========
+
+st.title("Reddit Discussion Summarizer & Q&A")
+st.write("Enter a Reddit post link to get a summary, then ask questions about it.")
 
 # Initialize session state variables
 if 'summary_data' not in st.session_state:
@@ -340,10 +441,16 @@ if 'error_message' not in st.session_state:
     st.session_state.error_message = None
 if 'reddit_url_input' not in st.session_state:
      st.session_state.reddit_url_input = ""
+if 'faiss_index' not in st.session_state:
+    st.session_state.faiss_index = None
+if 'summary_chunks' not in st.session_state:
+    st.session_state.summary_chunks = None
+# --- CHANGE: Use chat_history instead of single question/answer ---
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [] # Store {'role': 'user'/'assistant', 'content': 'message'}
 
 # Display API initialization errors if they occurred
 if st.session_state.get('reddit_error'):
-    # This error might already be shown above, but ensuring it's visible
     st.error(f"Reddit Initialization Error: {st.session_state.reddit_error}")
 if st.session_state.get('gemini_error'):
     st.warning(f"Gemini Initialization Warning: {st.session_state.gemini_error}")
@@ -352,7 +459,6 @@ if st.session_state.get('gemini_error'):
 # --- Input Area ---
 col1, col2, col3 = st.columns([4, 1, 1])
 with col1:
-    # Controlled input component
     user_input_url = st.text_input(
         "Reddit Post Link:",
         key="reddit_url_input_widget",
@@ -362,69 +468,91 @@ with col1:
 with col2:
     st.write("")
     st.write("")
-    # Disable button if API clients failed initialization? Maybe not, allow user to try.
-    summarize_button = st.button("Summarize", key="summarize_btn")
+    summarize_button = st.button("Summarize", key="summarize_btn", type="primary")
 with col3:
     st.write("")
     st.write("")
-    clear_button = st.button("Clear", key="clear_btn")
+    clear_button = st.button("Clear All", key="clear_btn")
 
 # --- Clear Button Logic ---
 if clear_button:
     st.session_state.reddit_url_input = ""
     st.session_state.summary_data = None
     st.session_state.error_message = None
-    # Clear the widget's internal state if needed (often rerun handles this)
-    # st.session_state.reddit_url_input_widget = "" # May not be necessary with on_change
+    st.session_state.faiss_index = None
+    st.session_state.summary_chunks = None
+    st.session_state.chat_history = [] # Clear chat history
+    print("Session state cleared.")
     st.rerun()
 
 # --- Summarize Button Logic ---
 if summarize_button and st.session_state.reddit_url_input:
-    input_url = st.session_state.reddit_url_input.strip() # Trim whitespace
-    st.session_state.error_message = None # Clear previous errors before trying
-    st.session_state.summary_data = None  # Clear previous results
+    input_url = st.session_state.reddit_url_input.strip()
+    # Clear previous results AND CHAT before starting new summary
+    st.session_state.error_message = None
+    st.session_state.summary_data = None
+    st.session_state.faiss_index = None
+    st.session_state.summary_chunks = None
+    st.session_state.chat_history = [] # Clear chat on new summary
 
-    # Basic client-side check (optional, backend does full check)
+    # --- Validation and Summary Generation (Mostly unchanged) ---
     if "reddit.com" not in input_url or not input_url.startswith("http"):
         st.session_state.error_message = "Please enter a valid Reddit link (starting with http:// or https:// and containing reddit.com)."
-        st.rerun() # Rerun to show error immediately
     elif not st.session_state.get('reddit_client'):
          st.session_state.error_message = "Cannot summarize: Reddit client failed to initialize. Check logs and API keys."
-         st.rerun()
+    elif not st.session_state.get('gemini_model') or not st.session_state.get('gemini_embedding_model'):
+         st.session_state.error_message = "Cannot summarize/QA: Gemini models failed to initialize. Check logs and API keys."
     else:
-        # Show spinner while processing
-        with st.spinner(f"Resolving URL, fetching Reddit data, and summarizing... Please wait."):
+        with st.spinner(f"Summarizing '{input_url[:50]}...' Please wait."):
             try:
-                # --- CALL THE LOCAL FUNCTION DIRECTLY ---
                 summary_result = get_reddit_summary(input_url)
                 st.session_state.summary_data = summary_result
-                st.session_state.error_message = None # Clear error on success
-
-            # --- CATCH ERRORS RAISED BY get_reddit_summary ---
+                st.session_state.error_message = None
+                current_summary = summary_result.get("gemini_summary")
+                if current_summary and not current_summary.startswith("["):
+                    with st.spinner("Creating searchable index for the summary..."):
+                        chunks = split_text_into_chunks(current_summary)
+                        if chunks:
+                            index, stored_chunks = create_faiss_index(
+                                chunks,
+                                st.session_state.gemini_embedding_model
+                            )
+                            if index and stored_chunks:
+                                st.session_state.faiss_index = index
+                                st.session_state.summary_chunks = stored_chunks
+                                print("Summary indexed successfully.")
+                            else:
+                                st.warning("Could not create a searchable index for the summary. Q&A will be disabled.")
+                        else:
+                            st.warning("Summary content was empty or too short to index. Q&A will be disabled.")
+                elif current_summary:
+                    st.warning(f"Summary generated, but may contain errors: {current_summary[:100]}... Q&A disabled.")
+                else:
+                     st.warning("Summary generation failed. Q&A disabled.")
             except (ValueError, FileNotFoundError, PermissionError, ConnectionError, TimeoutError, RuntimeError) as e:
-                # Catch the specific errors we defined/raised or standard ones
                 st.session_state.summary_data = None
-                st.session_state.error_message = f"Error: {e}" # Display the user-friendly message from the raised exception
+                st.session_state.error_message = f"Error during summarization: {e}"
             except Exception as e:
-                # Catch any other unexpected error during the call
                 st.session_state.summary_data = None
-                st.session_state.error_message = f"An unexpected frontend error occurred: {e}"
-                st.error(traceback.format_exc()) # Show detailed error in UI for debugging
-
-        st.rerun() # Rerun to display results or error message
+                st.session_state.error_message = f"An unexpected error occurred: {e}"
+                st.error(traceback.format_exc())
+    st.rerun()
 
 elif summarize_button and not st.session_state.reddit_url_input:
     st.warning("Please enter a Reddit link first.")
     st.session_state.summary_data = None
     st.session_state.error_message = None
-    # st.rerun() # Rerun might clear the warning too quickly, let it stay
 
-# --- Display Area (reads from session state) ---
+
+# --- Display Area ---
+# Removed the explicit columns for main/sidebar
+
 if st.session_state.error_message:
     st.error(st.session_state.error_message)
 
 if st.session_state.summary_data:
     data = st.session_state.summary_data
+
     st.subheader(f"Post Title: {data.get('title', 'N/A')}")
     original_link = data.get('original_url','#')
     resolved_link = data.get('resolved_url', '#')
@@ -433,30 +561,76 @@ if st.session_state.summary_data:
     else:
          st.markdown(f"[Link to Post]({resolved_link})")
 
-    st.subheader("Original Post Body")
-    st.markdown(data.get('body', '*No body text*'))
+    with st.expander("Original Post Body", expanded=False):
+        st.markdown(data.get('body', '*No body text*'))
 
     st.divider()
 
     st.subheader("✨ Comments Summary ✨")
-    # Check for specific error messages within the summary itself
     summary_text = data.get('gemini_summary', '*No summary generated.*')
-    if "[Error during Gemini API call:" in summary_text or "[Gemini response blocked" in summary_text:
-        st.warning(summary_text) # Show Gemini errors as warnings
+    if "[Error" in summary_text or "[Gemini response blocked" in summary_text or "[Summarization skipped" in summary_text:
+        st.warning(summary_text)
     else:
         st.markdown(summary_text)
 
-    with st.sidebar:
-        st.subheader("Processed Comments Preview")
-        st.text_area(
-            "Comment Threads",
+    st.divider()
+
+    # --- CHANGE: Chat Q&A Section ---
+    if st.session_state.get('faiss_index') and st.session_state.get('summary_chunks'):
+        st.subheader("❓ Chat About the Summary")
+
+        # Display existing chat messages
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        # React to user input using st.chat_input
+        if prompt := st.chat_input("Ask a question about the summary..."):
+            # Add user message to history and display it
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            # Generate and display assistant response
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    try:
+                        response = query_faiss_and_generate(
+                            question=prompt,
+                            index=st.session_state.faiss_index,
+                            chunks=st.session_state.summary_chunks,
+                            llm_model=st.session_state.gemini_model,
+                            embedding_model_name=st.session_state.gemini_embedding_model,
+                            top_k=3
+                        )
+                        st.markdown(response)
+                        # Add assistant response to history
+                        st.session_state.chat_history.append({"role": "assistant", "content": response})
+                    except Exception as e:
+                        error_msg = f"Sorry, an error occurred while answering: {e}"
+                        st.error(error_msg)
+                        # Optionally add error message to history as assistant response
+                        # st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
+                        print(f"Error in chat input processing: {e}")
+                        traceback.print_exc()
+
+    elif data.get("gemini_summary") and not data.get("gemini_summary", "").startswith("["):
+         st.info("Q&A about the summary is disabled (index creation failed or summary too short).")
+
+    st.divider()
+
+    # --- CHANGE: Moved Comments Preview to Main Area ---
+    with st.expander("Processed Comments Preview (Used for Summary)", expanded=False):
+         st.text_area(
+            "Comment Threads", # Changed label slightly
             data.get('formatted_comments_display', '*No comments processed or found.*'),
-            height=600,
+            height=400, # Reduced height slightly
             key="comments_display_area"
         )
 
-# --- Footer ---
-st.sidebar.markdown("---")
+
+# --- Footer (No change needed, can stay outside main data display area) ---
+st.sidebar.markdown("---") # Keep footer in sidebar if you like, or move below main content
 st.sidebar.info("App created by [Harsh Yadav](https://github.com/harshyadav1508)")
 
 # --- END OF FILE app.py ---
